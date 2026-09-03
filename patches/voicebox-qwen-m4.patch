@@ -1,0 +1,1770 @@
+diff --git a/.github/workflows/build-qwen-macos-arm64.yml b/.github/workflows/build-qwen-macos-arm64.yml
+new file mode 100644
+index 0000000..7d1fdbc
+--- /dev/null
++++ b/.github/workflows/build-qwen-macos-arm64.yml
+@@ -0,0 +1,70 @@
++name: Build Voicebox Qwen for Apple Silicon
++
++on:
++  workflow_dispatch:
++
++jobs:
++  build:
++    runs-on: macos-15
++    timeout-minutes: 120
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Install build tools
++        run: brew install python@3.12 llvm@20 bun
++
++      - name: Configure toolchains
++        run: |
++          echo "$(brew --prefix python@3.12)/bin" >> "$GITHUB_PATH"
++          echo "$(brew --prefix llvm@20)/bin" >> "$GITHUB_PATH"
++          echo "LLVM_CONFIG=$(brew --prefix llvm@20)/bin/llvm-config" >> "$GITHUB_ENV"
++          rustup target add aarch64-apple-darwin
++
++      - name: Install Python dependencies
++        run: |
++          python3.12 -m venv backend/venv
++          backend/venv/bin/python -m pip install --upgrade pip wheel setuptools pyinstaller
++          backend/venv/bin/pip install -r backend/requirements.txt
++          backend/venv/bin/pip install --no-deps chatterbox-tts hume-tada
++          backend/venv/bin/pip install -r backend/requirements-mlx.txt
++          backend/venv/bin/pip install --no-deps mlx-lm==0.31.1 mlx-audio==0.4.1
++
++      - name: Install frontend dependencies
++        run: bun install --frozen-lockfile
++
++      - name: Test Qwen and MLX patches
++        run: |
++          backend/venv/bin/python -m pytest \
++            backend/tests/test_qwen_generation_guards.py \
++            backend/tests/test_qwen_runaway_retry.py \
++            backend/tests/test_mlx_unload_clears_cache.py \
++            backend/tests/test_voice_prompt_cache_unload.py \
++            backend/tests/test_qwen_artifact_and_paragraphs.py
++          bun run typecheck
++
++      - name: Build sidecars
++        run: ./scripts/build-server.sh
++
++      - name: Build app
++        run: |
++          cd tauri
++          bun run tauri build \
++            --target aarch64-apple-darwin \
++            --config src-tauri/tauri.qwen-mac.conf.json \
++            --bundles app,dmg
++
++      - name: Ad-hoc sign and verify app
++        run: |
++          app_path="tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Voicebox Qwen M4.app"
++          codesign --force --deep --sign - "$app_path"
++          codesign --verify --deep --strict --verbose=2 "$app_path"
++
++      - name: Upload app and DMG
++        uses: actions/upload-artifact@v4
++        with:
++          name: Voicebox-Qwen-M4
++          if-no-files-found: error
++          path: |
++            tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Voicebox Qwen M4.app
++            tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+diff --git a/.gitignore b/.gitignore
+index 853c5060975fbeadd1fbd442d6dfb9c9a648813d..6303572898f3e2a1071f38cd103985e9124cc656 100644
+GIT binary patch
+delta 70
+zcmdnO{)v6V7G^sxWd)!7<is2W$AW^KRE6NooXq6>JcXpv%$yX3lA^@C;^d;tf)XyU
+WfNpMLa(=OHVo|P{iC#{AIu`(W-Wb{d
+
+delta 7
+OcmeywzJ-0m7G?kq>H{1A
+
+diff --git a/Build Voicebox Qwen M4.command b/Build Voicebox Qwen M4.command
+new file mode 100755
+index 0000000..2e5e471
+--- /dev/null
++++ b/Build Voicebox Qwen M4.command	
+@@ -0,0 +1,8 @@
++#!/bin/bash
++
++set -e
++project_dir="$(cd "$(dirname "$0")" && pwd)"
++cd "$project_dir"
++./scripts/build-macos-arm64.sh
++echo ""
++read -r -p "Press Enter to close this window..." _
+diff --git a/VOICEBOX-QWEN-MAC.md b/VOICEBOX-QWEN-MAC.md
+new file mode 100644
+index 0000000..40cd279
+--- /dev/null
++++ b/VOICEBOX-QWEN-MAC.md
+@@ -0,0 +1,53 @@
++# Voicebox Qwen M4
++
++Custom Apple Silicon build based on `jamiepine/voicebox` main at `51f49de`.
++
++## Included changes
++
++- PR #989: one persistent MLX worker for model load, inference, unload, and Whisper.
++- PR #1074: clear MLX allocator and voice-prompt caches on unload.
++- PR #1078: Qwen EOS/runaway guards, bounded decode, retry with smaller chunks,
++  and a 300-character Qwen default chunk size.
++- Conservative Qwen-only leading burst/decay cleanup adapted from PR #1048.
++- A 600 ms silence gap between newline-separated paragraphs.
++- Qwen 1.7B/0.6B are the only TTS choices shown; Russian is the default language.
++- Official-channel automatic updates are disabled so they cannot overwrite this patch set.
++
++Whisper remains available. Model weights are not bundled and are downloaded by
++Voicebox when selected.
++
++## Build on an M-series Mac
++
++1. Install Homebrew and Xcode Command Line Tools.
++2. Double-click **Build Voicebox Qwen M4.command**. If macOS blocks it,
++   right-click it and choose **Open** once.
++
++Terminal alternative: `./scripts/build-macos-arm64.sh`.
++
++The script validates the machine architecture, installs pinned build dependencies,
++runs the Qwen/MLX tests and TypeScript checks, builds the Python sidecars, creates
++the `.app` and `.dmg`, and verifies an ad-hoc code signature.
++Its full output is also saved to `build-macos-arm64.log` for diagnostics.
++
++Because the app is not Apple-notarized, macOS may quarantine a downloaded build.
++Prefer building locally. If Gatekeeper blocks the result, right-click the app and
++choose **Open** once instead of disabling Gatekeeper globally.
++
++## Existing Voicebox data
++
++The upstream bundle identifier is retained, so profiles and generations use the
++same application data location as official Voicebox. Back up important profiles
++before replacing an installed release.
++
++## Diagnostics
++
++If the backend does not start, run the sidecar directly from Terminal and save its
++output:
++
++```bash
++"/Applications/Voicebox Qwen M4.app/Contents/MacOS/voicebox-server" --help
++```
++
++For an MLX smoke test after opening the app, download Qwen3-TTS 0.6B first, clone a
++short Russian sample, generate two short paragraphs, then unload Qwen and Whisper
++from Settings while watching memory in Activity Monitor.
+diff --git a/app/src/App.tsx b/app/src/App.tsx
+index 177f97e..97c4985 100644
+--- a/app/src/App.tsx
++++ b/app/src/App.tsx
+@@ -95,8 +95,9 @@ function MainApp() {
+   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
+   const serverStartingRef = useRef(false);
+ 
+-  // Automatically check for app updates on startup and show toast notifications
+-  useAutoUpdater({ checkOnMount: true, showToast: true });
++  // This custom build intentionally stays on its pinned patch set. Updating
++  // from the official channel would silently replace the MLX/Qwen fixes.
++  useAutoUpdater({ checkOnMount: false, showToast: false });
+ 
+   // Replay the saved chord into the Rust hotkey listener every time
+   // capture_settings resolves or the user edits the chord.
+diff --git a/app/src/components/Generation/EngineModelSelector.tsx b/app/src/components/Generation/EngineModelSelector.tsx
+index d985642..f76009b 100644
+--- a/app/src/components/Generation/EngineModelSelector.tsx
++++ b/app/src/components/Generation/EngineModelSelector.tsx
+@@ -19,18 +19,10 @@ import type { GenerationFormValues } from '@/lib/hooks/useGenerationForm';
+ const ENGINE_OPTIONS = [
+   { value: 'qwen:1.7B', label: 'Qwen3-TTS 1.7B', engine: 'qwen' },
+   { value: 'qwen:0.6B', label: 'Qwen3-TTS 0.6B', engine: 'qwen' },
+-  { value: 'qwen_custom_voice:1.7B', label: 'Qwen CustomVoice 1.7B', engine: 'qwen_custom_voice' },
+-  { value: 'qwen_custom_voice:0.6B', label: 'Qwen CustomVoice 0.6B', engine: 'qwen_custom_voice' },
+-  { value: 'luxtts', label: 'LuxTTS', engine: 'luxtts' },
+-  { value: 'chatterbox', label: 'Chatterbox', engine: 'chatterbox' },
+-  { value: 'chatterbox_turbo', label: 'Chatterbox Turbo', engine: 'chatterbox_turbo' },
+-  { value: 'tada:1B', label: 'TADA 1B', engine: 'tada' },
+-  { value: 'tada:3B', label: 'TADA 3B Multilingual', engine: 'tada' },
+-  { value: 'kokoro', label: 'Kokoro 82M', engine: 'kokoro' },
+ ] as const;
+ 
+ const ENGINE_DESCRIPTIONS: Record<string, string> = {
+-  qwen: 'Multi-language, two sizes',
++  qwen: 'MLX voice cloning, optimized for Apple Silicon',
+   qwen_custom_voice: '9 preset voices, instruct control',
+   luxtts: 'Fast, English-focused',
+   chatterbox: '23 languages, incl. Hebrew',
+@@ -43,7 +35,7 @@ const ENGINE_DESCRIPTIONS: Record<string, string> = {
+ const ENGLISH_ONLY_ENGINES = new Set(['luxtts', 'chatterbox_turbo']);
+ 
+ /** Engines that support cloned (reference audio) profiles. */
+-const CLONING_ENGINES = new Set(['qwen', 'luxtts', 'chatterbox', 'chatterbox_turbo', 'tada']);
++const CLONING_ENGINES = new Set(['qwen']);
+ 
+ function getAvailableOptions(selectedProfile?: VoiceProfileResponse | null) {
+   if (!selectedProfile) return ENGINE_OPTIONS;
+diff --git a/app/src/lib/hooks/useGenerationForm.ts b/app/src/lib/hooks/useGenerationForm.ts
+index e90320e..effdc21 100644
+--- a/app/src/lib/hooks/useGenerationForm.ts
++++ b/app/src/lib/hooks/useGenerationForm.ts
+@@ -45,7 +45,16 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
+   const generation = useGeneration();
+   const addPendingGeneration = useGenerationStore((state) => state.addPendingGeneration);
+   const { settings: genSettings } = useGenerationSettings();
+-  const maxChunkChars = genSettings?.max_chunk_chars ?? 800;
++  // Factory default for the chunk slider. When the user hasn't customized
++  // it, leave max_chunk_chars unset so the backend can pick the engine's
++  // own default — Qwen engines use a smaller chunk as part of their
++  // EOS-miss runaway guard (300 chars vs the global 800).
++  const FACTORY_DEFAULT_CHUNK_CHARS = 800;
++  const customChunkChars =
++    genSettings?.max_chunk_chars != null &&
++    genSettings.max_chunk_chars !== FACTORY_DEFAULT_CHUNK_CHARS
++      ? genSettings.max_chunk_chars
++      : undefined;
+   const crossfadeMs = genSettings?.crossfade_ms ?? 50;
+   const normalizeAudio = genSettings?.normalize_audio ?? true;
+   const selectedEngine = useUIStore((state) => state.selectedEngine);
+@@ -62,7 +71,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
+     resolver: zodResolver(generationSchema),
+     defaultValues: {
+       text: '',
+-      language: 'en',
++      language: 'ru',
+       seed: undefined,
+       modelSize: '1.7B',
+       instruct: '',
+@@ -153,7 +162,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
+         engine,
+         instruct: supportsInstruct ? data.instruct || undefined : undefined,
+         personality: data.personality || undefined,
+-        max_chunk_chars: maxChunkChars,
++        max_chunk_chars: customChunkChars,
+         crossfade_ms: crossfadeMs,
+         normalize: normalizeAudio,
+         effects_chain: effectsChain?.length ? effectsChain : undefined,
+diff --git a/backend/backends/__init__.py b/backend/backends/__init__.py
+index 142c430..a05bf7e 100644
+--- a/backend/backends/__init__.py
++++ b/backend/backends/__init__.py
+@@ -57,6 +57,9 @@ class ModelConfig:
+     size_mb: int = 0
+     needs_trim: bool = False
+     retries_runaway: bool = False
++    # Engine-specific chunking default, used when a generation request
++    # does not set one explicitly; None falls back to the global default.
++    default_chunk_chars: int | None = None
+     supports_instruct: bool = False
+     languages: list[str] = field(default_factory=lambda: ["en"])
+ 
+@@ -233,9 +236,18 @@ def _get_qwen_model_configs() -> list[ModelConfig]:
+         repo_1_7b = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+         repo_0_6b = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+ 
+-    # mlx-audio can continue after an EOS miss with silence followed by
+-    # codec noise. Retry only the affected text as smaller chunks.
+-    retries_runaway = backend_type == "mlx"
++    # Qwen3-TTS can miss its codec EOS on ANY inference path — the EOS
++    # probability collapses to ~1e-14 (rank ~1500+, far outside top_k=50)
++    # and the model keeps decoding until max_new_tokens. This is
++    # model-intrinsic (measured on PyTorch CPU, MLX and sglang; see
++    # QwenLM/Qwen3-TTS#118 and sgl-project/sglang-omni#1179), so the
++    # retry guard must not be limited to the MLX backend.
++    retries_runaway = True
++
++    # Smaller chunks keep each autoregressive roll short, which both
++    # lowers the odds of an EOS miss and caps the damage when one
++    # happens. 300 chars ≈ 60-100s of audio per roll.
++    default_chunk_chars = 300
+ 
+     return [
+         ModelConfig(
+@@ -246,6 +258,7 @@ def _get_qwen_model_configs() -> list[ModelConfig]:
+             model_size="1.7B",
+             size_mb=3500,
+             retries_runaway=retries_runaway,
++            default_chunk_chars=default_chunk_chars,
+             supports_instruct=False,  # Base model drops instruct silently
+             languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+         ),
+@@ -257,6 +270,7 @@ def _get_qwen_model_configs() -> list[ModelConfig]:
+             model_size="0.6B",
+             size_mb=1200,
+             retries_runaway=retries_runaway,
++            default_chunk_chars=default_chunk_chars,
+             supports_instruct=False,
+             languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+         ),
+@@ -265,6 +279,8 @@ def _get_qwen_model_configs() -> list[ModelConfig]:
+ 
+ def _get_qwen_custom_voice_configs() -> list[ModelConfig]:
+     """Return Qwen CustomVoice model configs."""
++    # Same Qwen3-TTS autoregressive core as the Base engine, so the same
++    # EOS-miss runaway guard and chunking default apply.
+     return [
+         ModelConfig(
+             model_name="qwen-custom-voice-1.7B",
+@@ -273,6 +289,8 @@ def _get_qwen_custom_voice_configs() -> list[ModelConfig]:
+             hf_repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+             model_size="1.7B",
+             size_mb=3500,
++            retries_runaway=True,
++            default_chunk_chars=300,
+             supports_instruct=True,
+             languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+         ),
+@@ -283,6 +301,8 @@ def _get_qwen_custom_voice_configs() -> list[ModelConfig]:
+             hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+             model_size="0.6B",
+             size_mb=1200,
++            retries_runaway=True,
++            default_chunk_chars=300,
+             supports_instruct=True,
+             languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+         ),
+@@ -519,6 +539,18 @@ def engine_retries_runaway(engine: str) -> bool:
+     return False
+ 
+ 
++def get_engine_default_chunk_chars(engine: str) -> Optional[int]:
++    """Engine-specific chunk size to use when a request doesn't set one.
++
++    Returns None when the engine has no opinion, in which case callers
++    fall back to the global ``DEFAULT_MAX_CHUNK_CHARS``.
++    """
++    for cfg in get_tts_model_configs():
++        if cfg.engine == engine:
++            return cfg.default_chunk_chars
++    return None
++
++
+ def engine_has_model_sizes(engine: str) -> bool:
+     """Whether this engine supports multiple model sizes (only Qwen currently)."""
+     configs = [c for c in get_tts_model_configs() if c.engine == engine]
+@@ -566,6 +598,7 @@ def unload_model_by_config(config: ModelConfig) -> bool:
+     """Unload a model given its config. Returns True if it was loaded, False otherwise."""
+     from . import get_tts_backend_for_engine
+     from ..services import tts, transcribe, llm as llm_service
++    from ..utils.cache import clear_voice_prompt_memory_cache
+ 
+     if config.engine == "whisper":
+         whisper_model = transcribe.get_whisper_model()
+@@ -595,6 +628,7 @@ def unload_model_by_config(config: ModelConfig) -> bool:
+         loaded_size = getattr(backend, "_current_model_size", None) or getattr(backend, "model_size", None)
+         if backend.is_loaded() and loaded_size == config.model_size:
+             backend.unload_model()
++            clear_voice_prompt_memory_cache()
+             return True
+         return False
+ 
+@@ -602,6 +636,7 @@ def unload_model_by_config(config: ModelConfig) -> bool:
+     backend = get_tts_backend_for_engine(config.engine)
+     if backend.is_loaded():
+         backend.unload_model()
++        clear_voice_prompt_memory_cache()
+         return True
+     return False
+ 
+diff --git a/backend/backends/base.py b/backend/backends/base.py
+index 70ec11e..7ae4191 100644
+--- a/backend/backends/base.py
++++ b/backend/backends/base.py
+@@ -184,6 +184,20 @@ def empty_device_cache(device: str) -> None:
+         torch.xpu.empty_cache()
+ 
+ 
++def empty_mlx_cache() -> None:
++    """
++    Free cached memory in the MLX allocator.
++
++    MLX keeps freed array buffers in an internal pool for reuse instead of
++    returning them to the OS. Backends must call this after unloading an
++    MLX model, or the process's memory footprint never shrinks even though
++    the model object itself was dropped.
++    """
++    import mlx.core as mx
++
++    mx.clear_cache()
++
++
+ def manual_seed(seed: int, device: str) -> None:
+     """
+     Set the random seed on both CPU and the active accelerator.
+@@ -200,6 +214,36 @@ def manual_seed(seed: int, device: str) -> None:
+         torch.xpu.manual_seed(seed)
+ 
+ 
++# ── Qwen3-TTS decode budget ──────────────────────────────────────────
++#
++# Qwen3-TTS-12Hz occasionally misses its codec EOS and keeps decoding
++# until ``max_new_tokens``. The checkpoint ships with a budget of 8192
++# tokens ≈ 11.4 minutes of audio at 12 Hz, so a single EOS miss near the
++# end of a long chunk can append many minutes of near-silent gibberish
++# (measured: 175 chars of text produced 613s of runaway audio).
++#
++# Capping the budget per call bounds that damage. Normal speech never
++# comes close: the slowest sane delivery observed is ~2 chars/sec with
++# pauses ≈ 6 tokens/char at 12 Hz, so 12 tokens/char leaves ~2× headroom
++# even for the most deliberate narration.
++
++QWEN_TOKENS_PER_CHAR = 12
++QWEN_MIN_NEW_TOKENS = 1500  # ~2 min floor — short text must never truncate
++QWEN_MAX_NEW_TOKENS_CAP = 8192  # model's own hard limit
++
++
++def estimate_max_new_tokens(text: str) -> int:
++    """Bound a Qwen3-TTS decode so a missed EOS can't run for minutes.
++
++    Scales with the input length (punctuation/whitespace included — they
++    map to pauses, which cost tokens too), with a generous floor for
++    short text and the model's own limit as the cap.
++    """
++    chars = max(len(text.strip()), 1)
++    budget = chars * QWEN_TOKENS_PER_CHAR + QWEN_MIN_NEW_TOKENS // 2
++    return min(QWEN_MAX_NEW_TOKENS_CAP, max(QWEN_MIN_NEW_TOKENS, budget))
++
++
+ async def combine_voice_prompts(
+     audio_paths: List[str],
+     reference_texts: List[str],
+diff --git a/backend/backends/mlx_backend.py b/backend/backends/mlx_backend.py
+index 9692e59..f1fdf4f 100644
+--- a/backend/backends/mlx_backend.py
++++ b/backend/backends/mlx_backend.py
+@@ -7,19 +7,39 @@ import asyncio
+ import logging
+ import numpy as np
+ from pathlib import Path
++from concurrent.futures import ThreadPoolExecutor
+ 
+ logger = logging.getLogger(__name__)
+ 
++# MLX's Metal backend keeps a per-thread stream registry. Loading a model on
++# one worker thread (via asyncio.to_thread, which round-robins across the
++# default executor's pool) and then generating on a different worker thread
++# raises "There is no Stream(gpu, N) in current thread." All MLX calls in
++# this module must therefore run on the SAME OS thread for the process
++# lifetime — route them through this single-worker executor instead of
++# asyncio.to_thread's shared multi-worker pool.
++_mlx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-worker")
++
++
++def _run_on_mlx_thread(func, *args):
++    loop = asyncio.get_running_loop()
++    return loop.run_in_executor(_mlx_executor, func, *args)
++
+ # PATCH: Import and apply offline patch BEFORE any huggingface_hub usage
+ # This prevents mlx_audio from making network requests when models are cached
+-from ..utils.hf_offline_patch import patch_huggingface_hub_offline, ensure_original_qwen_config_cached
++from ..utils.hf_offline_patch import patch_huggingface_hub_offline, ensure_original_qwen_config_cached  # noqa: E402
+ 
+ patch_huggingface_hub_offline()
+ ensure_original_qwen_config_cached()
+ 
+-from . import TTSBackend, STTBackend, LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS
+-from .base import is_model_cached, combine_voice_prompts as _combine_voice_prompts, model_load_progress
+-from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
++from . import TTSBackend, STTBackend, LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS  # noqa: E402
++from .base import (  # noqa: E402
++    is_model_cached,
++    combine_voice_prompts as _combine_voice_prompts,
++    model_load_progress,
++    empty_mlx_cache,
++)
++from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt  # noqa: E402
+ 
+ 
+ class MLXTTSBackend:
+@@ -29,6 +49,10 @@ class MLXTTSBackend:
+         self.model = None
+         self.model_size = model_size
+         self._current_model_size = None
++        # Guards the whole load-then-use sequence in generate()/create_voice_prompt()
++        # so a concurrent request for a different model_size can't swap self.model
++        # out from under an in-flight request between its load and its inference.
++        self._op_lock = asyncio.Lock()
+ 
+     def is_loaded(self) -> bool:
+         """Check if model is loaded."""
+@@ -77,16 +101,23 @@ class MLXTTSBackend:
+         if self.model is not None and self._current_model_size == model_size:
+             return
+ 
+-        # Unload existing model if different size requested
+-        if self.model is not None and self._current_model_size != model_size:
+-            self.unload_model()
+-
+-        # Run blocking load in thread pool
+-        await asyncio.to_thread(self._load_model_sync, model_size)
++        # Unload (if needed) and load as ONE callable on the MLX worker thread.
++        # Doing this as two separate _run_on_mlx_thread calls would run the
++        # unload on whichever thread issues the second call — usually still
++        # correct, but a caller-side await gap between them would let another
++        # coroutine slip a conflicting load in between. One callable removes
++        # the gap.
++        await _run_on_mlx_thread(self._reload_sync, model_size)
+ 
+     # Alias for compatibility
+     load_model = load_model_async
+ 
++    def _reload_sync(self, model_size: str):
++        """Unload a mismatched model and load the requested one, in one MLX-thread op."""
++        if self.model is not None and self._current_model_size != model_size:
++            self._unload_model_sync()
++        self._load_model_sync(model_size)
++
+     def _load_model_sync(self, model_size: str):
+         """Synchronous model loading."""
+         model_path = self._get_model_path(model_size)
+@@ -105,11 +136,30 @@ class MLXTTSBackend:
+         logger.info("MLX TTS model %s loaded successfully", model_size)
+ 
+     def unload_model(self):
+-        """Unload the model to free memory."""
++        """Unload the model to free memory.
++
++        Safe to call from any thread (e.g. the FastAPI event loop, from the
++        /models/unload routes): the actual teardown is submitted to the MLX
++        worker thread and awaited synchronously here, so Metal resources are
++        always released on the same OS thread that created them. Do not call
++        this from within a callable already running ON the MLX worker thread
++        (e.g. from _reload_sync) — use _unload_model_sync directly there, or
++        this would deadlock the single-worker executor waiting on itself.
++        """
++        # Submit unconditionally rather than checking self.model here first:
++        # that check would race against a load already queued on the worker
++        # thread (this call could see None, skip, and leave a model that
++        # finishes loading a moment later still resident). The loaded check
++        # belongs inside _unload_model_sync, where it runs atomically with
++        # the teardown itself.
++        _mlx_executor.submit(self._unload_model_sync).result()
++
++    def _unload_model_sync(self):
+         if self.model is not None:
+             del self.model
+             self.model = None
+             self._current_model_size = None
++            empty_mlx_cache()
+             logger.info("MLX TTS model unloaded")
+ 
+     async def create_voice_prompt(
+@@ -132,7 +182,8 @@ class MLXTTSBackend:
+         Returns:
+             Tuple of (voice_prompt_dict, was_cached)
+         """
+-        await self.load_model_async(None)
++        async with self._op_lock:
++            await self.load_model_async(None)
+ 
+         # Check cache if enabled
+         if use_cache:
+@@ -187,8 +238,6 @@ class MLXTTSBackend:
+         Returns:
+             Tuple of (audio_array, sample_rate)
+         """
+-        await self.load_model_async(None)
+-
+         logger.info("Generating audio for text: %s", text)
+ 
+         def _generate_sync():
+@@ -258,8 +307,23 @@ class MLXTTSBackend:
+ 
+             return audio, sample_rate
+ 
+-        # Run blocking inference in thread pool
+-        audio, sample_rate = await asyncio.to_thread(_generate_sync)
++        def _reload_and_generate_sync():
++            """Ensure the configured model is loaded, then generate — as ONE
++            MLX-worker submission. Two separate submissions (load, then
++            generate) leave a gap after the load future resolves and before
++            the generate future is submitted; an unload_model() call from
++            another thread could land in that gap and tear down the model
++            this call is about to use. Folding both into one callable closes
++            the gap: the executor's own FIFO ordering is the only guarantee
++            this needs, and the reload check here is self-healing even if an
++            unload happened to run just before this callable started.
++            """
++            if self.model is None or self._current_model_size != self.model_size:
++                self._reload_sync(self.model_size)
++            return _generate_sync()
++
++        async with self._op_lock:
++            audio, sample_rate = await _run_on_mlx_thread(_reload_and_generate_sync)
+ 
+         return audio, sample_rate
+ 
+@@ -270,6 +334,8 @@ class MLXSTTBackend:
+     def __init__(self, model_size: str = "base"):
+         self.model = None
+         self.model_size = model_size
++        # See MLXTTSBackend._op_lock — same reason.
++        self._op_lock = asyncio.Lock()
+ 
+     def is_loaded(self) -> bool:
+         """Check if model is loaded."""
+@@ -293,7 +359,7 @@ class MLXSTTBackend:
+             return
+ 
+         # Run blocking load in thread pool
+-        await asyncio.to_thread(self._load_model_sync, model_size)
++        await _run_on_mlx_thread(self._load_model_sync, model_size)
+ 
+     # Alias for compatibility
+     load_model = load_model_async
+@@ -315,10 +381,19 @@ class MLXSTTBackend:
+         logger.info("MLX Whisper model %s loaded successfully", model_size)
+ 
+     def unload_model(self):
+-        """Unload the model to free memory."""
++        """Unload the model to free memory.
++
++        Safe to call from any thread — see MLXTTSBackend.unload_model for why,
++        including why this submits unconditionally instead of checking
++        self.model first.
++        """
++        _mlx_executor.submit(self._unload_model_sync).result()
++
++    def _unload_model_sync(self):
+         if self.model is not None:
+             del self.model
+             self.model = None
++            empty_mlx_cache()
+             logger.info("MLX Whisper model unloaded")
+ 
+     async def transcribe(
+@@ -338,7 +413,7 @@ class MLXSTTBackend:
+         Returns:
+             Transcribed text
+         """
+-        await self.load_model_async(model_size)
++        resolved_size = model_size if model_size is not None else self.model_size
+ 
+         def _transcribe_sync():
+             """Run synchronous transcription in thread pool."""
+@@ -363,5 +438,15 @@ class MLXSTTBackend:
+             else:
+                 return str(result).strip()
+ 
+-        # Run blocking transcription in thread pool
+-        return await asyncio.to_thread(_transcribe_sync)
++        def _reload_and_transcribe_sync():
++            """Ensure the requested model is loaded, then transcribe — as ONE
++            MLX-worker submission. See MLXTTSBackend._reload_and_generate_sync
++            for why this needs to be a single callable rather than a separate
++            load-then-transcribe pair.
++            """
++            if self.model is None or self.model_size != resolved_size:
++                self._load_model_sync(resolved_size)
++            return _transcribe_sync()
++
++        async with self._op_lock:
++            return await _run_on_mlx_thread(_reload_and_transcribe_sync)
+diff --git a/backend/backends/pytorch_backend.py b/backend/backends/pytorch_backend.py
+index f8ae79b..5511126 100644
+--- a/backend/backends/pytorch_backend.py
++++ b/backend/backends/pytorch_backend.py
+@@ -15,6 +15,7 @@ from .base import (
+     is_model_cached,
+     get_torch_device,
+     empty_device_cache,
++    estimate_max_new_tokens,
+     manual_seed,
+     combine_voice_prompts as _combine_voice_prompts,
+     model_load_progress,
+@@ -231,11 +232,17 @@ class PyTorchTTSBackend:
+ 
+             # See _create_prompt_sync comment — inference runs with the
+             # process's default HF_HUB_OFFLINE state (issue #462).
++            #
++            # Bound the decode window: Qwen3-TTS occasionally misses its
++            # codec EOS and would otherwise keep decoding (as silence or
++            # gibberish) until the checkpoint's 8192-token default —
++            # potentially minutes of junk appended to the clip.
+             wavs, sample_rate = self.model.generate_voice_clone(
+                 text=text,
+                 voice_clone_prompt=voice_prompt,
+                 language=LANGUAGE_CODE_TO_NAME.get(language, "auto"),
+                 instruct=instruct,
++                max_new_tokens=estimate_max_new_tokens(text),
+             )
+             return wavs[0], sample_rate
+ 
+diff --git a/backend/backends/qwen_custom_voice_backend.py b/backend/backends/qwen_custom_voice_backend.py
+index 74f739b..8344aa4 100644
+--- a/backend/backends/qwen_custom_voice_backend.py
++++ b/backend/backends/qwen_custom_voice_backend.py
+@@ -26,6 +26,7 @@ from .base import (
+     is_model_cached,
+     get_torch_device,
+     combine_voice_prompts as _combine_voice_prompts,
++    estimate_max_new_tokens,
+     model_load_progress,
+ )
+ 
+@@ -207,7 +208,13 @@ class QwenCustomVoiceBackend:
+             # state. Forcing offline here (issue #462) regressed online
+             # users whose libraries issue legitimate metadata lookups
+             # during generation.
+-            wavs, sample_rate = self.model.generate_custom_voice(**kwargs)
++            #
++            # Bound the decode window — same EOS-miss runaway risk as the
++            # Base engine (see estimate_max_new_tokens).
++            wavs, sample_rate = self.model.generate_custom_voice(
++                **kwargs,
++                max_new_tokens=estimate_max_new_tokens(text),
++            )
+             return wavs[0], sample_rate
+ 
+         audio, sample_rate = await asyncio.to_thread(_generate_sync)
+diff --git a/backend/backends/qwen_llm_backend.py b/backend/backends/qwen_llm_backend.py
+index 5d29d89..c17d90e 100644
+--- a/backend/backends/qwen_llm_backend.py
++++ b/backend/backends/qwen_llm_backend.py
+@@ -16,6 +16,7 @@ from .base import (
+     is_model_cached,
+     get_torch_device,
+     empty_device_cache,
++    empty_mlx_cache,
+     manual_seed,
+     model_load_progress,
+ )
+@@ -246,6 +247,7 @@ class MLXQwenLLMBackend:
+         self.model = None
+         self.tokenizer = None
+         self._current_model_size = None
++        empty_mlx_cache()
+         logger.info("Qwen3 (MLX) unloaded")
+ 
+     async def generate(
+diff --git a/backend/models.py b/backend/models.py
+index 7970ce4..c77edd7 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -96,6 +96,12 @@ class GenerationRequest(BaseModel):
+     crossfade_ms: int = Field(
+         default=50, ge=0, le=500, description="Crossfade duration in ms between chunks (0 for hard cut)"
+     )
++    paragraph_pause_ms: int = Field(
++        default=600,
++        ge=0,
++        le=10000,
++        description="Pause in ms inserted between newline-separated paragraphs (0 = disabled)",
++    )
+     normalize: bool = Field(default=True, description="Normalize output audio volume")
+     effects_chain: Optional[List["EffectConfig"]] = Field(
+         None, description="Effects chain to apply after generation (overrides profile default)"
+diff --git a/backend/routes/generations.py b/backend/routes/generations.py
+index fbbeece..9cb93f8 100644
+--- a/backend/routes/generations.py
++++ b/backend/routes/generations.py
+@@ -139,6 +139,7 @@ async def generate_speech(
+             mode="generate",
+             max_chunk_chars=data.max_chunk_chars,
+             crossfade_ms=data.crossfade_ms,
++            paragraph_pause_ms=data.paragraph_pause_ms,
+         )
+     )
+ 
+@@ -322,9 +323,9 @@ async def stream_speech(
+ ):
+     """Generate speech and stream the WAV audio directly without saving to disk."""
+     from ..backends import (
+-        engine_needs_trim,
+         engine_retries_runaway,
+         ensure_model_cached_or_raise,
++        get_engine_default_chunk_chars,
+         get_tts_backend_for_engine,
+         load_engine_model,
+     )
+@@ -354,14 +355,13 @@ async def stream_speech(
+ 
+     trim_fn = None
+     runaway_detector = None
+-    if engine_needs_trim(engine):
+-        from ..utils.audio import trim_tts_output
++    from ..utils.audio import build_trim_fn
+ 
+-        trim_fn = trim_tts_output
++    trim_fn = build_trim_fn(engine)
+     if engine_retries_runaway(engine):
+-        from ..utils.audio import has_tts_runaway
++        from ..utils.audio import detect_tts_runaway
+ 
+-        runaway_detector = has_tts_runaway
++        runaway_detector = detect_tts_runaway
+ 
+     audio, sample_rate = await generate_chunked(
+         tts_model,
+@@ -370,8 +370,13 @@ async def stream_speech(
+         language=data.language,
+         seed=data.seed,
+         instruct=data.instruct,
+-        max_chunk_chars=data.max_chunk_chars,
++        max_chunk_chars=(
++            data.max_chunk_chars
++            if data.max_chunk_chars is not None
++            else get_engine_default_chunk_chars(engine)
++        ),
+         crossfade_ms=data.crossfade_ms,
++        paragraph_pause_ms=data.paragraph_pause_ms,
+         trim_fn=trim_fn,
+         runaway_detector=runaway_detector,
+     )
+diff --git a/backend/services/generation.py b/backend/services/generation.py
+index a4b2e8a..a9709a1 100644
+--- a/backend/services/generation.py
++++ b/backend/services/generation.py
+@@ -41,6 +41,7 @@ async def run_generation(
+     mode: Literal["generate", "retry", "regenerate"],
+     max_chunk_chars: Optional[int] = None,
+     crossfade_ms: Optional[int] = None,
++    paragraph_pause_ms: Optional[int] = 600,
+     version_id: Optional[str] = None,
+ ) -> None:
+     """Execute TTS inference and persist the result.
+@@ -49,13 +50,13 @@ async def run_generation(
+     It is designed to be enqueued via ``services.task_queue.enqueue_generation``.
+     """
+     from ..backends import (
+-        engine_needs_trim,
+         engine_retries_runaway,
++        get_engine_default_chunk_chars,
+         get_tts_backend_for_engine,
+         load_engine_model,
+     )
+     from ..utils.chunked_tts import generate_chunked
+-    from ..utils.audio import has_tts_runaway, normalize_audio, save_audio, trim_tts_output
++    from ..utils.audio import build_trim_fn, detect_tts_runaway, normalize_audio, save_audio
+ 
+     task_manager = get_task_manager()
+     bg_db = next(get_db())
+@@ -76,8 +77,8 @@ async def run_generation(
+         )
+ 
+         await history.update_generation_status(generation_id, "generating", bg_db)
+-        trim_fn = trim_tts_output if engine_needs_trim(engine) else None
+-        runaway_detector = has_tts_runaway if engine_retries_runaway(engine) else None
++        trim_fn = build_trim_fn(engine)
++        runaway_detector = detect_tts_runaway if engine_retries_runaway(engine) else None
+ 
+         gen_kwargs: dict = dict(
+             language=language,
+@@ -88,8 +89,14 @@ async def run_generation(
+         )
+         if max_chunk_chars is not None:
+             gen_kwargs["max_chunk_chars"] = max_chunk_chars
++        else:
++            engine_default = get_engine_default_chunk_chars(engine)
++            if engine_default is not None:
++                gen_kwargs["max_chunk_chars"] = engine_default
+         if crossfade_ms is not None:
+             gen_kwargs["crossfade_ms"] = crossfade_ms
++        if paragraph_pause_ms is not None:
++            gen_kwargs["paragraph_pause_ms"] = paragraph_pause_ms
+ 
+         audio, sample_rate = await generate_chunked(tts_model, text, voice_prompt, **gen_kwargs)
+ 
+@@ -261,6 +268,7 @@ async def generate_audio_sync(
+     normalize: bool = True,
+     max_chunk_chars: Optional[int] = None,
+     crossfade_ms: Optional[int] = None,
++    paragraph_pause_ms: Optional[int] = 600,
+ ) -> bytes:
+     """Run a TTS generation synchronously and return the resulting wav bytes.
+ 
+@@ -275,13 +283,13 @@ async def generate_audio_sync(
+     (same helper ``/generate/stream`` uses).
+     """
+     from ..backends import (
+-        engine_needs_trim,
+         engine_retries_runaway,
++        get_engine_default_chunk_chars,
+         get_tts_backend_for_engine,
+         load_engine_model,
+     )
+     from ..utils.chunked_tts import generate_chunked
+-    from ..utils.audio import has_tts_runaway, normalize_audio, trim_tts_output
++    from ..utils.audio import build_trim_fn, detect_tts_runaway, normalize_audio
+     from . import tts
+ 
+     bg_db = next(get_db())
+@@ -298,8 +306,8 @@ async def generate_audio_sync(
+     finally:
+         bg_db.close()
+ 
+-    trim_fn = trim_tts_output if engine_needs_trim(engine) else None
+-    runaway_detector = has_tts_runaway if engine_retries_runaway(engine) else None
++    trim_fn = build_trim_fn(engine)
++    runaway_detector = detect_tts_runaway if engine_retries_runaway(engine) else None
+ 
+     gen_kwargs: dict = dict(
+         language=language,
+@@ -310,8 +318,14 @@ async def generate_audio_sync(
+     )
+     if max_chunk_chars is not None:
+         gen_kwargs["max_chunk_chars"] = max_chunk_chars
++    else:
++        engine_default = get_engine_default_chunk_chars(engine)
++        if engine_default is not None:
++            gen_kwargs["max_chunk_chars"] = engine_default
+     if crossfade_ms is not None:
+         gen_kwargs["crossfade_ms"] = crossfade_ms
++    if paragraph_pause_ms is not None:
++        gen_kwargs["paragraph_pause_ms"] = paragraph_pause_ms
+ 
+     audio, sample_rate = await generate_chunked(
+         tts_model, text, voice_prompt, **gen_kwargs
+diff --git a/backend/services/tts.py b/backend/services/tts.py
+index d4f90ff..9e7505f 100644
+--- a/backend/services/tts.py
++++ b/backend/services/tts.py
+@@ -8,6 +8,7 @@ import io
+ import soundfile as sf
+ 
+ from ..backends import get_tts_backend, TTSBackend
++from ..utils.cache import clear_voice_prompt_memory_cache
+ 
+ 
+ def get_tts_model() -> TTSBackend:
+@@ -24,6 +25,7 @@ def unload_tts_model():
+     """Unload TTS model to free memory."""
+     backend = get_tts_backend()
+     backend.unload_model()
++    clear_voice_prompt_memory_cache()
+ 
+ 
+ def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
+diff --git a/backend/tests/test_mlx_unload_clears_cache.py b/backend/tests/test_mlx_unload_clears_cache.py
+new file mode 100644
+index 0000000..0507548
+--- /dev/null
++++ b/backend/tests/test_mlx_unload_clears_cache.py
+@@ -0,0 +1,82 @@
++"""
++Regression tests: unloading an MLX-backed model must release MLX's internal
++buffer cache, not just drop the Python reference.
++
++MLX keeps freed array buffers in an internal pool for reuse instead of
++returning them to the OS (see `mlx.core.clear_cache` / `get_cache_memory`).
++Before this fix, `unload_model()` on the MLX TTS/Whisper/LLM backends only
++did `del self.model; self.model = None`, so the process's memory footprint
++never shrank after "unload" (issue: resources stay held after first use on
++Apple Silicon). These tests assert each backend's `unload_model()` calls the
++shared `empty_mlx_cache()` helper, without requiring the real `mlx` package
++to be installed — `empty_mlx_cache` is monkeypatched, so its own lazy
++`import mlx.core` never executes here.
++"""
++
++from unittest.mock import MagicMock
++
++import pytest
++
++pytest.importorskip("torch")
++
++from backend.backends import mlx_backend, qwen_llm_backend
++
++
++def test_mlx_tts_backend_unload_clears_mlx_cache(monkeypatch):
++    """Unloading the MLX TTS backend must call empty_mlx_cache()."""
++    mock_clear = MagicMock()
++    monkeypatch.setattr(mlx_backend, "empty_mlx_cache", mock_clear)
++
++    backend = mlx_backend.MLXTTSBackend()
++    backend.model = MagicMock()
++    backend._current_model_size = "1.7B"
++
++    backend.unload_model()
++
++    assert backend.model is None
++    assert backend._current_model_size is None
++    mock_clear.assert_called_once()
++
++
++def test_mlx_stt_backend_unload_clears_mlx_cache(monkeypatch):
++    """Unloading the MLX Whisper backend must call empty_mlx_cache()."""
++    mock_clear = MagicMock()
++    monkeypatch.setattr(mlx_backend, "empty_mlx_cache", mock_clear)
++
++    backend = mlx_backend.MLXSTTBackend()
++    backend.model = MagicMock()
++
++    backend.unload_model()
++
++    assert backend.model is None
++    mock_clear.assert_called_once()
++
++
++def test_mlx_llm_backend_unload_clears_mlx_cache(monkeypatch):
++    """Unloading the MLX Qwen3 LLM backend must call empty_mlx_cache()."""
++    mock_clear = MagicMock()
++    monkeypatch.setattr(qwen_llm_backend, "empty_mlx_cache", mock_clear)
++
++    backend = qwen_llm_backend.MLXQwenLLMBackend()
++    backend.model = MagicMock()
++    backend.tokenizer = MagicMock()
++    backend._current_model_size = "4B"
++
++    backend.unload_model()
++
++    assert backend.model is None
++    assert backend.tokenizer is None
++    mock_clear.assert_called_once()
++
++
++def test_mlx_backends_do_not_clear_cache_when_already_unloaded(monkeypatch):
++    """Calling unload on an already-unloaded backend is a no-op (no spurious clear)."""
++    mock_clear = MagicMock()
++    monkeypatch.setattr(mlx_backend, "empty_mlx_cache", mock_clear)
++
++    backend = mlx_backend.MLXTTSBackend()
++    assert backend.model is None
++
++    backend.unload_model()
++
++    mock_clear.assert_not_called()
+diff --git a/backend/tests/test_qwen_artifact_and_paragraphs.py b/backend/tests/test_qwen_artifact_and_paragraphs.py
+new file mode 100644
+index 0000000..f245b2d
+--- /dev/null
++++ b/backend/tests/test_qwen_artifact_and_paragraphs.py
+@@ -0,0 +1,63 @@
++"""Regression tests for the Qwen-focused audio cleanup additions."""
++
++import numpy as np
++import pytest
++
++from backend.utils.audio import trim_leading_artifact
++from backend.utils.chunked_tts import generate_chunked
++
++
++SAMPLE_RATE = 1000
++
++
++def test_leading_burst_decay_is_trimmed() -> None:
++    burst = np.concatenate(
++        [
++            np.full(50, 0.5, dtype=np.float32),
++            np.full(50, 0.05, dtype=np.float32),
++        ]
++    )
++    dip = np.zeros(50, dtype=np.float32)
++    speech = np.full(500, 0.2, dtype=np.float32)
++    audio = np.concatenate([burst, dip, speech])
++
++    trimmed = trim_leading_artifact(audio, SAMPLE_RATE, margin_ms=0, fade_ms=0)
++
++    assert len(trimmed) < len(audio)
++    assert np.allclose(trimmed[:20], 0.2)
++
++
++def test_normal_speech_start_is_not_trimmed() -> None:
++    audio = np.full(500, 0.2, dtype=np.float32)
++
++    trimmed = trim_leading_artifact(audio, SAMPLE_RATE)
++
++    assert trimmed is audio
++
++
++class _Backend:
++    def __init__(self) -> None:
++        self.calls: list[str] = []
++
++    async def generate(self, text, _prompt, _language, _seed, _instruct):
++        self.calls.append(text)
++        return np.ones(len(text) * 10, dtype=np.float32), SAMPLE_RATE
++
++
++@pytest.mark.asyncio
++async def test_paragraph_pause_inserts_exact_silence() -> None:
++    backend = _Backend()
++
++    audio, sample_rate = await generate_chunked(
++        backend,
++        "Первый абзац.\nВторой абзац.",
++        {},
++        language="ru",
++        paragraph_pause_ms=600,
++    )
++
++    assert sample_rate == SAMPLE_RATE
++    assert backend.calls == ["Первый абзац.", "Второй абзац."]
++    first_length = len("Первый абзац.") * 10
++    assert np.count_nonzero(audio[first_length : first_length + 600]) == 0
++    assert len(audio) == (len("Первый абзац.") + len("Второй абзац.")) * 10 + 600
+diff --git a/backend/tests/test_qwen_generation_guards.py b/backend/tests/test_qwen_generation_guards.py
+new file mode 100644
+index 0000000..3ce9e88
+--- /dev/null
++++ b/backend/tests/test_qwen_generation_guards.py
+@@ -0,0 +1,127 @@
++"""Coverage for the Qwen3-TTS EOS-miss guards.
++
++Qwen3-TTS occasionally misses its codec EOS. The decode then runs to
++``max_new_tokens`` (the checkpoint ships 8192 ≈ 11.4 min of audio) and
++appends minutes of near-silent gibberish to the clip. These tests cover
++the three layers that bound the damage:
++
++1. ``estimate_max_new_tokens`` — per-call decode budget.
++2. ``exceeds_plausible_speech_duration`` / ``detect_tts_runaway`` —
++   catching runaways the internal-silence detector misses (measured in
++   the wild: 175 chars of text produced 613s of low-level gibberish
++   with no internal silence gap).
++3. Engine wiring — qwen engines retry flagged chunks on every backend
++   and default to smaller chunks unless the request overrides.
++"""
++
++import numpy as np
++
++from backend.backends import (
++    get_engine_default_chunk_chars,
++    get_tts_model_configs,
++)
++from backend.backends.base import (
++    QWEN_MAX_NEW_TOKENS_CAP,
++    estimate_max_new_tokens,
++)
++from backend.utils.audio import (
++    detect_tts_runaway,
++    exceeds_plausible_speech_duration,
++)
++
++SAMPLE_RATE = 24000
++
++
++# ── decode budget ────────────────────────────────────────────────────
++
++
++def test_short_text_gets_minimum_budget():
++    assert estimate_max_new_tokens("hi") == 1500
++
++
++def test_budget_scales_with_text_length():
++    # 300 chars ≈ a default qwen chunk; the budget must exceed the
++    # slowest sane delivery (~6 tokens/char at 12 Hz) with headroom.
++    budget = estimate_max_new_tokens("a" * 300)
++    assert budget == 300 * 12 + 750
++    assert budget / 300 >= 12
++
++
++def test_budget_is_capped_at_model_limit():
++    assert estimate_max_new_tokens("a" * 100_000) == QWEN_MAX_NEW_TOKENS_CAP
++
++
++def test_budget_never_truncates_slow_normal_delivery():
++    # Worst sane pace: ~2 chars/sec incl. pauses = 6 tokens/char.
++    # The budget must exceed that for any length below the cap.
++    for chars in (50, 175, 300, 500, 800):
++        budget = estimate_max_new_tokens("a" * chars)
++        slow_normal = chars * 6
++        expected_cap = QWEN_MAX_NEW_TOKENS_CAP
++        if slow_normal < expected_cap:
++            assert budget >= slow_normal, chars
++
++
++# ── duration-based runaway detection ─────────────────────────────────
++
++
++def test_duration_detector_flags_eos_miss_runaway():
++    # Real-world failure: 175 chars of text → 613s of low-level noise.
++    audio = np.full(613 * SAMPLE_RATE, 0.01, dtype=np.float32)
++    assert exceeds_plausible_speech_duration(audio, SAMPLE_RATE, "a" * 175)
++    assert detect_tts_runaway(audio, SAMPLE_RATE, "a" * 175)
++
++
++def test_duration_detector_passes_normal_delivery():
++    # 800 chars at a very deliberate 2 chars/sec ≈ 400s — well within
++    # the plausible envelope (800 / 1.2 + 15 ≈ 682s).
++    audio = np.full(400 * SAMPLE_RATE, 0.2, dtype=np.float32)
++    assert not exceeds_plausible_speech_duration(audio, SAMPLE_RATE, "a" * 800)
++    assert not detect_tts_runaway(audio, SAMPLE_RATE, "a" * 800)
++
++
++def test_duration_detector_tolerates_trailing_silence():
++    # Normal clip plus a couple seconds of trailing silence.
++    speech = np.full(30 * SAMPLE_RATE, 0.2, dtype=np.float32)
++    silence = np.zeros(2 * SAMPLE_RATE, dtype=np.float32)
++    audio = np.concatenate([speech, silence])
++    assert not detect_tts_runaway(audio, SAMPLE_RATE, "a" * 100)
++
++
++def test_duration_detector_ignores_whitespace_padding():
++    # Blank lines / indent runs must not raise the threshold: 100 spoken
++    # chars + 1500 padding chars still caps the plausible duration at
++    # 100/1.2 + 15 ≈ 98s, so a 110s runaway is flagged.
++    padded_text = ("a" * 100) + ("\n\n  \t" * 250)
++    audio = np.full(110 * SAMPLE_RATE, 0.01, dtype=np.float32)
++    assert exceeds_plausible_speech_duration(audio, SAMPLE_RATE, padded_text)
++
++
++def test_duration_detector_handles_empty_input():
++    assert not exceeds_plausible_speech_duration(np.array([], dtype=np.float32), SAMPLE_RATE, "text")
++    assert not exceeds_plausible_speech_duration(np.full(1000, 0.2, dtype=np.float32), SAMPLE_RATE, "")
++
++
++# ── engine wiring ────────────────────────────────────────────────────
++
++
++def test_qwen_engines_default_to_smaller_chunks():
++    assert get_engine_default_chunk_chars("qwen") == 300
++    assert get_engine_default_chunk_chars("qwen_custom_voice") == 300
++
++
++def test_other_engines_have_no_chunk_override():
++    assert get_engine_default_chunk_chars("kokoro") is None
++    assert get_engine_default_chunk_chars("luxtts") is None
++
++
++def test_every_qwen_config_carries_the_guards():
++    qwen_configs = [
++        c
++        for c in get_tts_model_configs()
++        if c.engine in ("qwen", "qwen_custom_voice")
++    ]
++    assert len(qwen_configs) == 4
++    for cfg in qwen_configs:
++        assert cfg.retries_runaway, cfg.model_name
++        assert cfg.default_chunk_chars == 300, cfg.model_name
+diff --git a/backend/tests/test_qwen_runaway_retry.py b/backend/tests/test_qwen_runaway_retry.py
+index 650385f..f42fcbe 100644
+--- a/backend/tests/test_qwen_runaway_retry.py
++++ b/backend/tests/test_qwen_runaway_retry.py
+@@ -1,4 +1,4 @@
+-"""Regression coverage for runaway MLX Qwen TTS output."""
++"""Regression coverage for runaway Qwen TTS output."""
+ 
+ from unittest.mock import patch
+ 
+@@ -6,7 +6,7 @@ import numpy as np
+ import pytest
+ 
+ from backend.backends import engine_needs_trim, engine_retries_runaway
+-from backend.utils.audio import has_tts_runaway
++from backend.utils.audio import detect_tts_runaway, has_tts_runaway
+ from backend.utils.chunked_tts import generate_chunked
+ 
+ SAMPLE_RATE = 1000
+@@ -18,10 +18,21 @@ def test_mlx_qwen_enables_runaway_retry_without_aggressive_trim():
+         assert engine_retries_runaway("qwen") is True
+ 
+ 
+-def test_pytorch_qwen_keeps_runaway_retry_disabled():
++def test_pytorch_qwen_enables_runaway_retry_too():
++    # EOS misses are model-intrinsic (QwenLM/Qwen3-TTS#118) — the guard
++    # must cover the PyTorch CPU/GPU path as well, not just MLX.
+     with patch("backend.backends.get_backend_type", return_value="pytorch"):
+         assert engine_needs_trim("qwen") is False
+-        assert engine_retries_runaway("qwen") is False
++        assert engine_retries_runaway("qwen") is True
++
++
++def test_qwen_custom_voice_enables_runaway_retry():
++    with patch("backend.backends.get_backend_type", return_value="pytorch"):
++        assert engine_retries_runaway("qwen_custom_voice") is True
++
++
++def test_non_qwen_engines_keep_runaway_retry_disabled():
++    assert engine_retries_runaway("kokoro") is False
+ 
+ 
+ def test_detector_flags_long_internal_silence():
+@@ -78,7 +89,7 @@ async def test_runaway_chunk_is_retried_as_smaller_chunks():
+         {},
+         max_chunk_chars=800,
+         crossfade_ms=50,
+-        runaway_detector=has_tts_runaway,
++        runaway_detector=detect_tts_runaway,
+     )
+ 
+     assert sample_rate == SAMPLE_RATE
+@@ -111,7 +122,7 @@ async def test_persistent_runaway_fails_instead_of_returning_corrupt_audio():
+             text,
+             {},
+             max_chunk_chars=800,
+-            runaway_detector=has_tts_runaway,
++            runaway_detector=detect_tts_runaway,
+         )
+ 
+     assert [len(call) for call in backend.calls] == [241, 120, 100]
+diff --git a/backend/tests/test_voice_prompt_cache_unload.py b/backend/tests/test_voice_prompt_cache_unload.py
+new file mode 100644
+index 0000000..ab09a01
+--- /dev/null
++++ b/backend/tests/test_voice_prompt_cache_unload.py
+@@ -0,0 +1,91 @@
++"""
++Regression tests: unloading a TTS model must also drop the in-memory
++voice-prompt cache.
++
++`backend/utils/cache.py` keeps a process-lifetime `_memory_cache` dict of
++voice-clone prompts (tensors or device-backed dicts produced by whichever
++TTS model created them). Before this fix, nothing ever cleared it on
++unload, so those prompts stayed referenced — and their memory held —
++indefinitely, even after the model that produced them was gone. Whisper
++and the LLM backends never produce voice prompts, so their unload paths
++must leave the cache alone.
++"""
++
++from unittest.mock import MagicMock
++
++import pytest
++
++from backend import backends as backends_module
++from backend.backends import ModelConfig
++from backend.services import tts as tts_service
++from backend.utils import cache as cache_module
++
++
++@pytest.fixture(autouse=True)
++def _reset_memory_cache():
++    """Isolate each test from the shared process-lifetime _memory_cache dict."""
++    cache_module._memory_cache.clear()
++    yield
++    cache_module._memory_cache.clear()
++
++
++def _populate_memory_cache():
++    cache_module._memory_cache["some-cache-key"] = {"ref_audio": "x.wav", "ref_text": "hi"}
++
++
++def test_clear_voice_prompt_memory_cache_leaves_disk_cache_alone(tmp_path, monkeypatch):
++    """Clearing the memory cache must not touch cached .prompt files on disk."""
++    monkeypatch.setattr(cache_module, "_get_cache_dir", lambda: tmp_path)
++    disk_file = tmp_path / "some-cache-key.prompt"
++    disk_file.write_bytes(b"fake torch.save payload")
++    _populate_memory_cache()
++
++    cache_module.clear_voice_prompt_memory_cache()
++
++    assert cache_module._memory_cache == {}
++    assert disk_file.exists()
++
++
++def test_unload_tts_model_clears_voice_prompt_memory_cache(monkeypatch):
++    """/models/unload (the legacy qwen-only endpoint) must clear the prompt cache."""
++    fake_backend = MagicMock()
++    monkeypatch.setattr(tts_service, "get_tts_backend", lambda: fake_backend)
++    _populate_memory_cache()
++
++    tts_service.unload_tts_model()
++
++    fake_backend.unload_model.assert_called_once()
++    assert cache_module._memory_cache == {}
++
++
++def test_unload_model_by_config_clears_cache_for_generic_tts_engine(monkeypatch):
++    """Unloading any non-qwen TTS engine (e.g. kokoro) must clear the prompt cache."""
++    fake_backend = MagicMock()
++    fake_backend.is_loaded.return_value = True
++    monkeypatch.setattr(backends_module, "get_tts_backend_for_engine", lambda engine: fake_backend)
++    _populate_memory_cache()
++
++    config = ModelConfig(model_name="kokoro", display_name="Kokoro", engine="kokoro", hf_repo_id="x/y")
++    was_loaded = backends_module.unload_model_by_config(config)
++
++    assert was_loaded is True
++    fake_backend.unload_model.assert_called_once()
++    assert cache_module._memory_cache == {}
++
++
++def test_unload_model_by_config_leaves_cache_alone_for_whisper(monkeypatch):
++    """Whisper never produces voice prompts, so unloading it must not touch the cache."""
++    fake_whisper = MagicMock()
++    fake_whisper.is_loaded.return_value = True
++    fake_whisper.model_size = "base"
++    monkeypatch.setattr("backend.services.transcribe.get_whisper_model", lambda: fake_whisper)
++    _populate_memory_cache()
++    cache_before = dict(cache_module._memory_cache)
++
++    config = ModelConfig(
++        model_name="whisper-base", display_name="Whisper Base", engine="whisper", hf_repo_id="x/y", model_size="base"
++    )
++    was_loaded = backends_module.unload_model_by_config(config)
++
++    assert was_loaded is True
++    assert cache_module._memory_cache == cache_before
+diff --git a/backend/utils/audio.py b/backend/utils/audio.py
+index bccab2c..330097b 100644
+--- a/backend/utils/audio.py
++++ b/backend/utils/audio.py
+@@ -147,6 +147,66 @@ def has_tts_runaway(
+     return False
+ 
+ 
++# Minimum delivery rate considered sane, in non-whitespace characters per
++# second of audio. The slowest normal narration observed in the wild (very
++# short lines with heavy pausing) runs ~1.6 chars/sec; anything meaningfully
++# below this means the model is emitting silence/gibberish, not speech.
++# Whitespace is excluded so padding (blank lines, indent runs) can't
++# inflate the threshold and mask a runaway.
++MIN_PLAUSIBLE_CHARS_PER_SEC = 1.2
++# Grace period added on top of the expected duration to absorb leading/
++# trailing silence and natural end-of-clip decay.
++PLAUSIBLE_DURATION_BUFFER_S = 15.0
++
++
++def exceeds_plausible_speech_duration(
++    audio: np.ndarray,
++    sample_rate: int,
++    text: str,
++    min_chars_per_sec: float = MIN_PLAUSIBLE_CHARS_PER_SEC,
++    buffer_seconds: float = PLAUSIBLE_DURATION_BUFFER_S,
++) -> bool:
++    """Detect a clip that runs far longer than its text can plausibly fill.
++
++    Catches the worst EOS-miss runaway shape — the model renders the text
++    (or degenerates immediately) and then emits near-silent "room tone"
++    or gibberish for minutes. Such output is not always bounded by
++    internal silence, so :func:`has_tts_runaway` alone misses it; the
++    duration ratio is the reliable signal. Only non-whitespace characters
++    count (blank lines and padding must not raise the threshold), and
++    trailing junk under the buffer is tolerated, so healthy clips never
++    trip this.
++    """
++    if audio is None or len(audio) == 0 or not text:
++        return False
++
++    spoken_chars = len("".join(text.split()))
++    if spoken_chars == 0:
++        return False
++
++    duration_s = len(audio) / sample_rate
++    max_plausible_s = spoken_chars / min_chars_per_sec + buffer_seconds
++    return duration_s > max_plausible_s
++
++
++def detect_tts_runaway(
++    audio: np.ndarray,
++    sample_rate: int,
++    text: str,
++) -> bool:
++    """Combined runaway detector used for Qwen3-TTS engines.
++
++    Flags either shape of an EOS miss:
++      - speech → long internal silence → more output
++        (:func:`has_tts_runaway`), or
++      - output that runs implausibly long for its input text
++        (:func:`exceeds_plausible_speech_duration`).
++    """
++    return has_tts_runaway(audio, sample_rate) or exceeds_plausible_speech_duration(
++        audio, sample_rate, text
++    )
++
++
+ def trim_tts_output(
+     audio: np.ndarray,
+     sample_rate: int = 24000,
+@@ -236,6 +296,102 @@ def trim_tts_output(
+     return trimmed
+ 
+ 
++def trim_leading_artifact(
++    audio: np.ndarray,
++    sample_rate: int = 24000,
++    frame_ms: int = 10,
++    burst_threshold_db: float = -38.0,
++    dip_threshold_db: float = -58.0,
++    min_dip_ms: int = 30,
++    max_burst_ms: int = 800,
++    lookahead_ms: int = 1200,
++    speech_after_db: float = -45.0,
++    decay_diff_db: float = 6.0,
++    margin_ms: int = 20,
++    fade_ms: int = 10,
++) -> np.ndarray:
++    """Remove a Qwen leading burst only when burst/decay/dip/speech all match."""
++    frame_len = int(sample_rate * frame_ms / 1000)
++    if frame_len == 0 or len(audio) < frame_len * 4:
++        return audio
++
++    n_frames = len(audio) // frame_len
++    rms = np.array(
++        [
++            np.sqrt(np.mean(audio[i * frame_len : (i + 1) * frame_len] ** 2))
++            for i in range(n_frames)
++        ]
++    )
++    db = 20.0 * np.log10(rms + 1e-12)
++    min_dip_frames = max(1, int(min_dip_ms / frame_ms))
++    max_burst_frames = int(max_burst_ms / frame_ms)
++    lookahead_frames = int(lookahead_ms / frame_ms)
++
++    loud_idx = np.where(db > burst_threshold_db)[0]
++    if len(loud_idx) == 0:
++        return audio
++    burst_start = int(loud_idx[0])
++
++    dip_start = -1
++    dip_len = 0
++    index = burst_start + 1
++    limit = min(n_frames, burst_start + max_burst_frames + min_dip_frames)
++    while index < limit:
++        if db[index] < dip_threshold_db:
++            dip_end = index
++            while dip_end < limit and db[dip_end] < dip_threshold_db:
++                dip_end += 1
++            if dip_end - index >= min_dip_frames:
++                dip_start = index
++                dip_len = dip_end - index
++                break
++            index = dip_end
++        else:
++            index += 1
++
++    if dip_start == -1:
++        return audio
++
++    burst = db[burst_start:dip_start]
++    if len(burst) >= 4:
++        half = len(burst) // 2
++        if float(np.mean(burst[:half]) - np.mean(burst[half : half * 2])) < decay_diff_db:
++            return audio
++
++    after_start = dip_start + dip_len
++    window_end = min(n_frames, after_start + lookahead_frames)
++    if window_end <= after_start or float(np.max(db[after_start:window_end])) < speech_after_db:
++        return audio
++
++    trim_frame = after_start + int(margin_ms / frame_ms)
++    start_sample = min(trim_frame * frame_len, len(audio) - 1)
++    trimmed = audio[start_sample:].copy()
++    fade_samples = int(sample_rate * fade_ms / 1000)
++    if fade_samples > 0 and len(trimmed) > fade_samples:
++        fade = np.sin(np.linspace(0, np.pi / 2, fade_samples)) ** 2
++        trimmed[:fade_samples] *= fade
++    return trimmed
++
++
++def build_trim_fn(engine: str):
++    """Return the conservative per-chunk trim pipeline for an engine."""
++    from ..backends import engine_needs_trim
++
++    needs_leading_trim = engine in {"qwen", "qwen_custom_voice"}
++    needs_trailing_trim = engine_needs_trim(engine)
++    if not needs_leading_trim and not needs_trailing_trim:
++        return None
++
++    def _trim(audio: np.ndarray, sample_rate: int) -> np.ndarray:
++        if needs_leading_trim:
++            audio = trim_leading_artifact(audio, sample_rate)
++        if needs_trailing_trim:
++            audio = trim_tts_output(audio, sample_rate)
++        return audio
++
++    return _trim
++
++
+ def preprocess_reference_audio(
+     audio: np.ndarray,
+     sample_rate: int,
+diff --git a/backend/utils/cache.py b/backend/utils/cache.py
+index dd4b9f8..4c9a073 100644
+--- a/backend/utils/cache.py
++++ b/backend/utils/cache.py
+@@ -93,6 +93,19 @@ def cache_voice_prompt(
+     torch.save(voice_prompt, cache_file)
+ 
+ 
++def clear_voice_prompt_memory_cache() -> None:
++    """
++    Drop the in-memory voice prompt cache without touching the disk cache.
++
++    Backends call this when a TTS model unloads: the cached prompts (tensors
++    or device-backed dicts produced by that model) would otherwise keep
++    referencing memory forever, since nothing else ever clears this
++    process-lifetime dict. The disk cache is left alone, so the next
++    generation just reloads the prompt from disk instead of recomputing it.
++    """
++    _memory_cache.clear()
++
++
+ def clear_voice_prompt_cache() -> int:
+     """
+     Clear all voice prompt caches (memory and disk).
+diff --git a/backend/utils/chunked_tts.py b/backend/utils/chunked_tts.py
+index 7dbefdb..15bc98a 100644
+--- a/backend/utils/chunked_tts.py
++++ b/backend/utils/chunked_tts.py
+@@ -214,6 +214,7 @@ async def generate_chunked(
+     crossfade_ms: int = 50,
+     trim_fn=None,
+     runaway_detector=None,
++    paragraph_pause_ms: int = 0,
+ ) -> Tuple[np.ndarray, int]:
+     """Generate audio with automatic chunking for long text.
+ 
+@@ -243,13 +244,56 @@ async def generate_chunked(
+         function applied to each chunk before concatenation (e.g.
+         ``trim_tts_output`` for Chatterbox engines).
+     runaway_detector : callable | None
+-        Optional ``(audio, sample_rate) -> bool`` detector. When it flags
+-        unstable output, the affected text is split in half and retried.
++        Optional ``(audio, sample_rate, chunk_text) -> bool`` detector.
++        When it flags unstable output, the affected text is split in
++        half and retried. Receives the chunk text so duration-based
++        checks can compare output length against input length.
++    paragraph_pause_ms : int
++        Silence inserted between non-empty newline-separated paragraphs.
+ 
+     Returns
+     -------
+     (audio, sample_rate) : Tuple[np.ndarray, int]
+     """
++    if paragraph_pause_ms > 0 and "\n" in text:
++        paragraphs = [paragraph.strip() for paragraph in text.split("\n") if paragraph.strip()]
++        if len(paragraphs) > 1:
++            logger.info(
++                "Splitting into %d paragraphs with %dms pause between them",
++                len(paragraphs),
++                paragraph_pause_ms,
++            )
++            paragraph_audio: List[np.ndarray] = []
++            sample_rate: int | None = None
++            silence: np.ndarray | None = None
++            for paragraph in paragraphs:
++                if silence is not None:
++                    paragraph_audio.append(silence)
++                audio, paragraph_sr = await generate_chunked(
++                    backend,
++                    paragraph,
++                    voice_prompt,
++                    language=language,
++                    seed=seed,
++                    instruct=instruct,
++                    max_chunk_chars=max_chunk_chars,
++                    crossfade_ms=crossfade_ms,
++                    trim_fn=trim_fn,
++                    runaway_detector=runaway_detector,
++                    paragraph_pause_ms=0,
++                )
++                if sample_rate is None:
++                    sample_rate = paragraph_sr
++                    silence = np.zeros(
++                        int(sample_rate * paragraph_pause_ms / 1000),
++                        dtype=np.float32,
++                    )
++                elif paragraph_sr != sample_rate:
++                    raise RuntimeError("TTS backend changed sample rate between paragraphs")
++                paragraph_audio.append(np.asarray(audio, dtype=np.float32))
++
++            return np.concatenate(paragraph_audio), sample_rate
++
+     async def generate_one(
+         chunk_text: str,
+         chunk_seed: int | None,
+@@ -263,7 +307,9 @@ async def generate_chunked(
+             instruct,
+         )
+ 
+-        if runaway_detector is not None and runaway_detector(chunk_audio, chunk_sr):
++        if runaway_detector is not None and runaway_detector(
++            chunk_audio, chunk_sr, chunk_text
++        ):
+             if retry_depth >= MAX_RUNAWAY_RETRIES or len(chunk_text) <= MIN_RUNAWAY_RETRY_CHARS:
+                 raise RuntimeError(
+                     "TTS output remained unstable after retrying smaller text chunks"
+diff --git a/scripts/build-macos-arm64.sh b/scripts/build-macos-arm64.sh
+new file mode 100755
+index 0000000..cd47bd0
+--- /dev/null
++++ b/scripts/build-macos-arm64.sh
+@@ -0,0 +1,79 @@
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++project_dir="$(cd "$(dirname "$0")/.." && pwd)"
++cd "$project_dir"
++log_path="$project_dir/build-macos-arm64.log"
++exec > >(tee "$log_path") 2>&1
++trap 'status=$?; if [[ $status -ne 0 ]]; then echo "Build failed (exit $status). Log: $log_path"; fi' EXIT
++
++if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
++  echo "Error: this build must run on an Apple Silicon Mac (arm64)." >&2
++  exit 1
++fi
++
++for command_name in brew xcode-select; do
++  if ! command -v "$command_name" >/dev/null 2>&1; then
++    echo "Error: missing $command_name." >&2
++    exit 1
++  fi
++done
++
++if ! xcode-select -p >/dev/null 2>&1; then
++  echo "Error: install Xcode Command Line Tools with: xcode-select --install" >&2
++  exit 1
++fi
++
++brew install python@3.12 llvm@20 bun
++
++if ! command -v rustup >/dev/null 2>&1; then
++  brew install rustup-init
++  rustup-init -y --profile minimal
++fi
++export PATH="$HOME/.cargo/bin:$(brew --prefix python@3.12)/bin:$(brew --prefix llvm@20)/bin:$PATH"
++export LLVM_CONFIG="$(brew --prefix llvm@20)/bin/llvm-config"
++
++rustup toolchain install stable --profile minimal
++rustup target add aarch64-apple-darwin
++
++python3.12 -m venv backend/venv
++backend/venv/bin/python -m pip install --upgrade pip wheel setuptools
++backend/venv/bin/pip install pyinstaller
++backend/venv/bin/pip install -r backend/requirements.txt
++backend/venv/bin/pip install --no-deps chatterbox-tts hume-tada
++backend/venv/bin/pip install -r backend/requirements-mlx.txt
++backend/venv/bin/pip install --no-deps mlx-lm==0.31.1 mlx-audio==0.4.1
++
++bun install --frozen-lockfile
++backend/venv/bin/python -m pytest \
++  backend/tests/test_qwen_generation_guards.py \
++  backend/tests/test_qwen_runaway_retry.py \
++  backend/tests/test_mlx_unload_clears_cache.py \
++  backend/tests/test_voice_prompt_cache_unload.py \
++  backend/tests/test_qwen_artifact_and_paragraphs.py
++bun run typecheck
++
++./scripts/build-server.sh
++(
++  cd tauri
++  bun run tauri build \
++    --target aarch64-apple-darwin \
++    --config src-tauri/tauri.qwen-mac.conf.json \
++    --bundles app,dmg
++)
++
++app_path="tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Voicebox Qwen M4.app"
++if [[ ! -d "$app_path" ]]; then
++  echo "Error: app bundle was not produced at: $app_path" >&2
++  exit 1
++fi
++
++codesign --force --deep --sign - "$app_path"
++codesign --verify --deep --strict --verbose=2 "$app_path"
++
++echo ""
++echo "Build complete:"
++echo "  $app_path"
++echo "  tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/"
++echo "  Log: $log_path"
+diff --git a/tauri/src-tauri/tauri.qwen-mac.conf.json b/tauri/src-tauri/tauri.qwen-mac.conf.json
+new file mode 100644
+index 0000000..a165351
+--- /dev/null
++++ b/tauri/src-tauri/tauri.qwen-mac.conf.json
+@@ -0,0 +1,12 @@
++{
++  "productName": "Voicebox Qwen M4",
++  "bundle": {
++    "createUpdaterArtifacts": false,
++    "targets": ["app", "dmg"]
++  },
++  "plugins": {
++    "updater": {
++      "endpoints": []
++    }
++  }
++}
