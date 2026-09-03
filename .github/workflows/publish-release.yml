@@ -1,0 +1,38 @@
+name: Publish Voicebox Qwen M4 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish-release.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download successful ARM64 build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: "9874422377"
+        run: |
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip" > build-artifact.zip
+          unzip -q build-artifact.zip -d extracted
+          app_zip="$(find extracted -type f -name '*.app.zip' -print -quit)"
+          dmg="$(find extracted -type f -name '*.dmg' -print -quit)"
+          test -n "$app_zip"
+          test -n "$dmg"
+          cp "$app_zip" Voicebox-Qwen-M4.app.zip
+          cp "$dmg" Voicebox-Qwen-M4.dmg
+          shasum -a 256 Voicebox-Qwen-M4.app.zip Voicebox-Qwen-M4.dmg
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v0.1.0 --repo "${{ github.repository }}" --cleanup-tag --yes 2>/dev/null || true
+          gh release create v0.1.0             Voicebox-Qwen-M4.dmg             Voicebox-Qwen-M4.app.zip             --repo "${{ github.repository }}"             --title "Voicebox Qwen M4 v0.1.0"             --notes "Apple Silicon ARM64 build focused on Qwen3-TTS and Russian voice generation. Includes MLX thread-affinity fixes, Qwen runaway protection, MLX cache cleanup, artifact trimming, paragraph pauses, and Whisper. Ad-hoc signed; not Apple-notarized."
