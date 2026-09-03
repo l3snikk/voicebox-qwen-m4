@@ -1,0 +1,105 @@
+name: Build Voicebox Qwen M4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - patches/voicebox-qwen-m4.patch
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out build overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Check out pinned Voicebox upstream
+        uses: actions/checkout@v4
+        with:
+          repository: jamiepine/voicebox
+          ref: 51f49dea198384b4eb6087b72c17057c6eb1c1cd
+          path: source
+
+      - name: Apply Qwen M4 patch set
+        run: git apply --check ../overlay/patches/voicebox-qwen-m4.patch && git apply ../overlay/patches/voicebox-qwen-m4.patch
+        working-directory: source
+
+      - name: Verify Apple Silicon runner
+        run: |
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+
+      - name: Install build tools
+        run: brew install python@3.12 llvm@20 bun
+
+      - name: Configure toolchains
+        run: |
+          echo "$(brew --prefix python@3.12)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm@20)/bin" >> "$GITHUB_PATH"
+          echo "LLVM_CONFIG=$(brew --prefix llvm@20)/bin/llvm-config" >> "$GITHUB_ENV"
+          rustup target add aarch64-apple-darwin
+
+      - name: Install Python dependencies
+        working-directory: source
+        run: |
+          python3.12 -m venv backend/venv
+          backend/venv/bin/python -m pip install --upgrade pip wheel setuptools pyinstaller
+          backend/venv/bin/pip install -r backend/requirements.txt
+          backend/venv/bin/pip install --no-deps chatterbox-tts hume-tada
+          backend/venv/bin/pip install -r backend/requirements-mlx.txt
+          backend/venv/bin/pip install --no-deps mlx-lm==0.31.1 mlx-audio==0.4.1
+
+      - name: Install frontend dependencies
+        working-directory: source
+        run: bun install --frozen-lockfile
+
+      - name: Test patch set
+        working-directory: source
+        run: |
+          backend/venv/bin/python -m pytest \
+            backend/tests/test_qwen_generation_guards.py \
+            backend/tests/test_qwen_runaway_retry.py \
+            backend/tests/test_mlx_unload_clears_cache.py \
+            backend/tests/test_voice_prompt_cache_unload.py \
+            backend/tests/test_qwen_artifact_and_paragraphs.py
+          bun run typecheck
+
+      - name: Build Python sidecars
+        working-directory: source
+        run: ./scripts/build-server.sh
+
+      - name: Build app and DMG
+        working-directory: source/tauri
+        run: |
+          bun run tauri build \
+            --target aarch64-apple-darwin \
+            --config src-tauri/tauri.qwen-mac.conf.json \
+            --bundles app,dmg
+
+      - name: Ad-hoc sign and verify
+        run: |
+          app_path="source/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Voicebox Qwen M4.app"
+          codesign --force --deep --sign - "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+
+      - name: Package signed app
+        run: ditto -c -k --sequesterRsrc --keepParent "source/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Voicebox Qwen M4.app" Voicebox-Qwen-M4.app.zip
+
+      - name: Upload application artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Voicebox-Qwen-M4
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            Voicebox-Qwen-M4.app.zip
+            source/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
